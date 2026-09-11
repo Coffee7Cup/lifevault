@@ -29,6 +29,22 @@ import {
   INITIAL_TRANSFER_TRACKERS,
   INITIAL_RECOVERY_TIMELINE_TASKS,
 } from '../data/mockData';
+import {
+  clearToken,
+  createAsset,
+  createDocument,
+  createTrustedPerson,
+  deleteAsset as deleteAssetRequest,
+  deleteDocument as deleteDocumentRequest,
+  deleteTrustedPerson as deleteTrustedPersonRequest,
+  getAssets,
+  getDocuments,
+  getMe,
+  getTrustedPeople,
+  TOKEN_KEY,
+  updateAsset as updateAssetRequest,
+  updateTrustedPerson as updateTrustedPersonRequest,
+} from '../lib/api';
 import confetti from 'canvas-confetti';
 
 export interface ToastItem {
@@ -130,8 +146,7 @@ const emptyUser: UserProfile = {
 
 export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentView, setCurrentView] = useState<AppView>(() => {
-    const savedAuth = localStorage.getItem('lifevault_authenticated');
-    return savedAuth === 'true' ? 'dashboard' : 'landing';
+    return 'landing';
   });
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     const savedTheme = localStorage.getItem('theme');
@@ -145,8 +160,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     document.documentElement.style.backgroundColor = theme === 'dark' ? '#000000' : '#ffffff';
   }, [theme]);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
-    const savedAuth = localStorage.getItem('lifevault_authenticated');
-    return savedAuth === 'true';
+    return false;
   });
 
   const setCurrentViewSafe = (view: AppView) => {
@@ -158,9 +172,9 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const logoutSession = () => {
+    clearToken();
     setIsAuthenticated(false);
     setCurrentView('landing');
-    localStorage.setItem('lifevault_authenticated', 'false');
     localStorage.removeItem('lifevault_user');
     localStorage.removeItem('lifevault_assets');
     localStorage.removeItem('lifevault_documents');
@@ -176,16 +190,37 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   }, [isAuthenticated]);
 
-  // Sync auth state to localStorage and listen for multi-tab logout/login
   useEffect(() => {
-    localStorage.setItem('lifevault_authenticated', String(isAuthenticated));
-  }, [isAuthenticated]);
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) return;
+
+    getMe(token)
+      .then((verifiedUser) => {
+        setUser(verifiedUser);
+        setIsAuthenticated(true);
+      })
+      .catch(() => {
+        clearToken();
+        setIsAuthenticated(false);
+      });
+  }, []);
 
   useEffect(() => {
     const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === 'lifevault_authenticated') {
-        const nextAuth = e.newValue === 'true';
-        setIsAuthenticated(nextAuth);
+      if (e.key === TOKEN_KEY) {
+        if (!e.newValue) {
+          setIsAuthenticated(false);
+          return;
+        }
+        getMe(e.newValue)
+          .then((verifiedUser) => {
+            setUser(verifiedUser);
+            setIsAuthenticated(true);
+          })
+          .catch(() => {
+            clearToken();
+            setIsAuthenticated(false);
+          });
       }
       if (e.key === 'theme' && (e.newValue === 'light' || e.newValue === 'dark')) {
         setTheme(e.newValue);
@@ -195,35 +230,26 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
   const [user, setUser] = useState<UserProfile>(() => {
-    const savedVersion = localStorage.getItem('lifevault_data_version');
-    if (savedVersion !== 'v2.2_indian_names_avatars') {
-      localStorage.setItem('lifevault_data_version', 'v2.2_indian_names_avatars');
-      localStorage.setItem('lifevault_user', JSON.stringify(INITIAL_USER));
-      localStorage.setItem('lifevault_assets', JSON.stringify(INITIAL_ASSETS));
-      localStorage.setItem('lifevault_documents', JSON.stringify(INITIAL_DOCUMENTS));
-      localStorage.setItem('lifevault_people', JSON.stringify(INITIAL_TRUSTED_PEOPLE));
-      localStorage.setItem('lifevault_recovery', JSON.stringify(INITIAL_RECOVERY_STEPS));
-      return INITIAL_USER;
-    }
-    const saved = localStorage.getItem('lifevault_user');
-    return saved ? JSON.parse(saved) : INITIAL_USER;
+    return emptyUser;
   });
-  const [assets, setAssets] = useState<AssetItem[]>(() => {
-    const saved = localStorage.getItem('lifevault_assets');
-    return saved ? JSON.parse(saved) : INITIAL_ASSETS;
-  });
-  const [documents, setDocuments] = useState<DocumentItem[]>(() => {
-    const saved = localStorage.getItem('lifevault_documents');
-    return saved ? JSON.parse(saved) : INITIAL_DOCUMENTS;
-  });
-  const [trustedPeople, setTrustedPeople] = useState<TrustedPerson[]>(() => {
-    const saved = localStorage.getItem('lifevault_people');
-    return saved ? JSON.parse(saved) : INITIAL_TRUSTED_PEOPLE;
-  });
-  const [recoverySteps, setRecoverySteps] = useState<RecoveryStep[]>(() => {
-    const saved = localStorage.getItem('lifevault_recovery');
-    return saved ? JSON.parse(saved) : INITIAL_RECOVERY_STEPS;
-  });
+  const [assets, setAssets] = useState<AssetItem[]>([]);
+  const [documents, setDocuments] = useState<DocumentItem[]>([]);
+  const [trustedPeople, setTrustedPeople] = useState<TrustedPerson[]>([]);
+  const [recoverySteps, setRecoverySteps] = useState<RecoveryStep[]>([]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    Promise.all([getAssets(), getDocuments(), getTrustedPeople()])
+      .then(([nextAssets, nextDocuments, nextPeople]) => {
+        setAssets(nextAssets);
+        setDocuments(nextDocuments);
+        setTrustedPeople(nextPeople);
+      })
+      .catch((error) => {
+        console.error('Unable to load vault data:', error);
+        logoutSession();
+      });
+  }, [isAuthenticated]);
 
   const loadDemoVault = () => {
     setUser(INITIAL_USER);
@@ -635,13 +661,19 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setAuditLogs((prev) => [newLog, ...prev]);
   };
 
-  const addAsset = (assetData: Omit<AssetItem, 'id' | 'updatedAt'>) => {
+  const addAsset = async (assetData: Omit<AssetItem, 'id' | 'updatedAt'>) => {
     const newAsset: AssetItem = {
       ...assetData,
       id: 'ast-' + Date.now(),
       updatedAt: 'Just now',
     };
-    setAssets((prev) => [newAsset, ...prev]);
+    try {
+      const savedAsset = await createAsset(newAsset);
+      setAssets((prev) => [savedAsset, ...prev]);
+    } catch {
+      showToast({ type: 'warning', title: 'Asset Not Saved', message: 'Unable to sync this asset to your vault.' });
+      return;
+    }
     showToast({
       type: 'success',
       title: 'Asset Added & Encrypted',
@@ -657,10 +689,14 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   };
 
-  const updateAsset = (id: string, updated: Partial<AssetItem>) => {
-    setAssets((prev) =>
-      prev.map((a) => (a.id === id ? { ...a, ...updated, updatedAt: 'Just now' } : a))
-    );
+  const updateAsset = async (id: string, updated: Partial<AssetItem>) => {
+    try {
+      const savedAsset = await updateAssetRequest(id, { ...updated, updatedAt: 'Just now' });
+      setAssets((prev) => prev.map((a) => (a.id === id ? savedAsset : a)));
+    } catch {
+      showToast({ type: 'warning', title: 'Asset Not Saved', message: 'Unable to sync this asset to your vault.' });
+      return;
+    }
     showToast({
       type: 'info',
       title: 'Asset Updated',
@@ -668,8 +704,14 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   };
 
-  const deleteAsset = (id: string) => {
+  const deleteAsset = async (id: string) => {
     const asset = assets.find((a) => a.id === id);
+    try {
+      await deleteAssetRequest(id);
+    } catch {
+      showToast({ type: 'warning', title: 'Asset Not Removed', message: 'Unable to update your vault.' });
+      return;
+    }
     setAssets((prev) => prev.filter((a) => a.id !== id));
     showToast({
       type: 'warning',
@@ -678,14 +720,20 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   };
 
-  const addDocument = (docData: Omit<DocumentItem, 'id' | 'uploadDate' | 'sha256'>) => {
+  const addDocument = async (docData: Omit<DocumentItem, 'id' | 'uploadDate' | 'sha256'>) => {
     const newDoc: DocumentItem = {
       ...docData,
       id: 'doc-' + Date.now(),
       uploadDate: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
       sha256: Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join(''),
     };
-    setDocuments((prev) => [newDoc, ...prev]);
+    try {
+      const savedDocument = await createDocument(newDoc);
+      setDocuments((prev) => [savedDocument, ...prev]);
+    } catch {
+      showToast({ type: 'warning', title: 'Document Not Saved', message: 'Unable to sync this document to your vault.' });
+      return;
+    }
     showToast({
       type: 'security',
       title: 'Document Verified by AI OCR',
@@ -701,8 +749,14 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   };
 
-  const deleteDocument = (id: string) => {
+  const deleteDocument = async (id: string) => {
     const doc = documents.find((d) => d.id === id);
+    try {
+      await deleteDocumentRequest(id);
+    } catch {
+      showToast({ type: 'warning', title: 'Document Not Removed', message: 'Unable to update your vault.' });
+      return;
+    }
     setDocuments((prev) => prev.filter((d) => d.id !== id));
     showToast({
       type: 'warning',
@@ -711,13 +765,19 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   };
 
-  const addTrustedPerson = (personData: Omit<TrustedPerson, 'id' | 'lastActive'>) => {
+  const addTrustedPerson = async (personData: Omit<TrustedPerson, 'id' | 'lastActive'>) => {
     const newPerson: TrustedPerson = {
       ...personData,
       id: 'tp-' + Date.now(),
       lastActive: 'Invitation sent just now',
     };
-    setTrustedPeople((prev) => [newPerson, ...prev]);
+    try {
+      const savedPerson = await createTrustedPerson(newPerson);
+      setTrustedPeople((prev) => [savedPerson, ...prev]);
+    } catch {
+      showToast({ type: 'warning', title: 'Trustee Not Saved', message: 'Unable to sync this trustee to your vault.' });
+      return;
+    }
     showToast({
       type: 'success',
       title: 'Trustee Added to Multi-Sig',
@@ -733,10 +793,14 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   };
 
-  const updateTrustedPerson = (id: string, updated: Partial<TrustedPerson>) => {
-    setTrustedPeople((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, ...updated } : p))
-    );
+  const updateTrustedPerson = async (id: string, updated: Partial<TrustedPerson>) => {
+    try {
+      const savedPerson = await updateTrustedPersonRequest(id, updated);
+      setTrustedPeople((prev) => prev.map((p) => (p.id === id ? savedPerson : p)));
+    } catch {
+      showToast({ type: 'warning', title: 'Trustee Not Saved', message: 'Unable to sync this trustee to your vault.' });
+      return;
+    }
     showToast({
       type: 'security',
       title: 'Permissions Updated',
@@ -744,8 +808,14 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   };
 
-  const deleteTrustedPerson = (id: string) => {
+  const deleteTrustedPerson = async (id: string) => {
     const person = trustedPeople.find((p) => p.id === id);
+    try {
+      await deleteTrustedPersonRequest(id);
+    } catch {
+      showToast({ type: 'warning', title: 'Trustee Not Removed', message: 'Unable to update your vault.' });
+      return;
+    }
     setTrustedPeople((prev) => prev.filter((p) => p.id !== id));
     showToast({
       type: 'warning',

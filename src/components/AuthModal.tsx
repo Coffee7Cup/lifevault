@@ -3,18 +3,14 @@ import { useVault } from '../context/VaultContext';
 import {
   Lock,
   Mail,
-  Shield,
   User,
   Phone,
-  ScanFace,
-  CheckCircle2,
   X,
-  Sparkles,
   ArrowRight,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { LifeVaultLogo } from './LifeVaultLogo';
-import { INITIAL_USER } from '../data/mockData';
+import { login, signup } from '../lib/api';
 
 export const AuthModal: React.FC = () => {
   const {
@@ -26,104 +22,60 @@ export const AuthModal: React.FC = () => {
     setUser,
     showToast,
     theme,
-    resetVaultState,
-    loadDemoVault,
   } = useVault();
 
-  const DEMO_EMAIL = 'chandanvamsi101@gmail.com';
-  const DEMO_PASSWORD = 'LifeVault123';
-
-  const [email, setEmail] = useState(DEMO_EMAIL);
-  const [password, setPassword] = useState(DEMO_PASSWORD);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [signupPassword, setSignupPassword] = useState('');
-  const [emergencyContact, setEmergencyContact] = useState('+91 98450 19284 (Ananya Sharma)');
-  const [isFaceIdScanning, setIsFaceIdScanning] = useState(false);
-  const [faceIdSuccess, setFaceIdSuccess] = useState(false);
+  const [emergencyContact, setEmergencyContact] = useState('');
+  const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const isDark = theme === 'dark';
 
   if (!authModalOpen) return null;
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const normalizedEmail = email.trim().toLowerCase();
-    const normalizedPassword = password.trim();
-
-    if (normalizedEmail === DEMO_EMAIL.toLowerCase() && normalizedPassword === DEMO_PASSWORD) {
-      loadDemoVault();
+    setError('');
+    setIsSubmitting(true);
+    try {
+      const response = await login(email, password);
+      setUser(response.user);
       setIsAuthenticated(true);
       setAuthModalOpen(false);
       showToast({
         type: 'security',
         title: 'Authenticated Successfully',
-        message: 'Demo vault unlocked and ready for review.',
+        message: 'Your LifeVault is unlocked.',
       });
-      return;
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : 'Unable to sign in.');
+    } finally {
+      setIsSubmitting(false);
     }
-
-    setUser((prev) => ({
-      ...prev,
-      name: name || prev.name || 'Account Holder',
-      email: normalizedEmail || prev.email || 'user@lifvault.app',
-      tier: 'Standard',
-      avatar: prev.avatar,
-    }));
-    setIsAuthenticated(true);
-    setAuthModalOpen(false);
-    showToast({
-      type: 'security',
-      title: 'Authenticated Successfully',
-      message: 'Zero-Knowledge enclave unlocked with AES-256 session token.',
-    });
   };
 
-  const handleSignupSubmit = (e: React.FormEvent) => {
+  const handleSignupSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const nextName = name.trim();
-    const nextEmail = email.trim();
-
-    if (!nextName || !nextEmail || !signupPassword.trim()) return;
-
-    resetVaultState({
-      name: nextName,
-      email: nextEmail,
-      phone: '',
-      tier: 'Free',
-      avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=300&auto=format&fit=crop&q=80',
-      joinedDate: 'Just now',
-      emergencyTriggerDelayHours: 48,
-      biometricEnabled: false,
-      mfaEnabled: false,
-      zeroKnowledgeKeyBackup: false,
-      emergencyModeActive: false,
-    });
-    setIsAuthenticated(true);
-    setAuthModalOpen(false);
-    showToast({
-      type: 'success',
-      title: 'LifeVault Account Provisioned',
-      message: `Welcome to LIFEVAULT AI, ${nextName}. Your vault is ready and empty.`,
-    });
-  };
-
-  const triggerFaceIdScan = () => {
-    setIsFaceIdScanning(true);
-    setFaceIdSuccess(false);
-
-    setTimeout(() => {
-      setFaceIdSuccess(true);
-      setTimeout(() => {
-        setIsFaceIdScanning(false);
-        setIsAuthenticated(true);
-        setAuthModalOpen(false);
-        showToast({
-          type: 'security',
-          title: 'Face ID Biometric Confirmed',
-          message: 'Hardware enclave verified user credentials (Apple Secure Enclave).',
-        });
-      }, 900);
-    }, 1800);
+    setError('');
+    setIsSubmitting(true);
+    try {
+      const response = await signup(name, email, signupPassword, emergencyContact);
+      setUser(response.user);
+      setIsAuthenticated(true);
+      setAuthModalOpen(false);
+      showToast({
+        type: 'success',
+        title: 'LifeVault Account Provisioned',
+        message: `Welcome to LIFEVAULT AI, ${response.user.name}. Your vault is ready and empty.`,
+      });
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : 'Unable to create your account.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -200,60 +152,6 @@ export const AuthModal: React.FC = () => {
             </button>
           </div>
 
-          {/* Biometric Face ID Button */}
-          {authMode === 'login' && (
-            <div className="mb-6">
-              <button
-                type="button"
-                onClick={triggerFaceIdScan}
-                disabled={isFaceIdScanning}
-                className={`w-full relative overflow-hidden py-3 px-4 rounded-xl border flex items-center justify-center space-x-3 text-xs font-semibold transition-all group ${
-                  isDark
-                    ? 'bg-blue-950/20 border-blue-500/30 hover:border-blue-500/60 text-blue-400 hover:bg-blue-900/30'
-                    : 'bg-blue-50 border-blue-200 hover:border-blue-400 text-blue-700'
-                }`}
-              >
-                {isFaceIdScanning ? (
-                  <div className="flex items-center space-x-2">
-                    <ScanFace className="w-4 h-4 animate-pulse text-blue-400" />
-                    <span>Scanning Face ID Sensor...</span>
-                  </div>
-                ) : faceIdSuccess ? (
-                  <div className="flex items-center space-x-2 text-emerald-400">
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>Biometric Enclave Authenticated!</span>
-                  </div>
-                ) : (
-                  <>
-                    <ScanFace className="w-4 h-4 text-blue-400 group-hover:scale-110 transition-transform" />
-                    <span>Sign In with Apple Face ID / Touch ID</span>
-                  </>
-                )}
-
-                {/* Laser scan animation bar */}
-                {isFaceIdScanning && (
-                  <motion.div
-                    className="absolute inset-x-0 h-0.5 bg-blue-400 shadow-[0_0_12px_#3b82f6]"
-                    initial={{ top: '0%' }}
-                    animate={{ top: ['0%', '100%', '0%'] }}
-                    transition={{ repeat: Infinity, duration: 1.2, ease: 'linear' }}
-                  />
-                )}
-              </button>
-
-              <div className="relative my-5">
-                <div className="absolute inset-0 flex items-center">
-                  <div className={`w-full border-t ${isDark ? 'border-neutral-800' : 'border-neutral-200'}`} />
-                </div>
-                <div className="relative flex justify-center text-[10px] uppercase">
-                  <span className={`px-2 font-mono ${isDark ? 'bg-[#111111] text-neutral-500' : 'bg-white text-neutral-400'}`}>
-                    or continue with email
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-
           {/* Form Content */}
           {authMode === 'login' ? (
             <form onSubmit={handleLoginSubmit} className="space-y-3.5">
@@ -298,7 +196,7 @@ export const AuthModal: React.FC = () => {
                 type="submit"
                 className="w-full mt-2 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-[0_0_20px_rgba(37,99,235,0.3)] transition-all flex items-center justify-center space-x-2"
               >
-                <span>Unlock Vault Dashboard</span>
+                <span>{isSubmitting ? 'Signing In...' : 'Unlock Vault Dashboard'}</span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </button>
             </form>
@@ -313,7 +211,6 @@ export const AuthModal: React.FC = () => {
                     required
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="Chandan Vamsi"
                     className={`w-full pl-10 pr-4 py-2.5 rounded-xl border text-xs focus:outline-none focus:ring-2 focus:ring-blue-500/40 transition-all ${
                       isDark ? 'bg-[#181818] border-[#262626] text-white' : 'bg-neutral-50 border-neutral-200 text-neutral-900'
                     }`}
@@ -330,7 +227,21 @@ export const AuthModal: React.FC = () => {
                     required
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="chandanvamsi101@gmail.com"
+                    className={`w-full pl-10 pr-4 py-2.5 rounded-xl border text-xs focus:outline-none focus:ring-2 focus:ring-blue-500/40 transition-all ${
+                      isDark ? 'bg-[#181818] border-[#262626] text-white' : 'bg-neutral-50 border-neutral-200 text-neutral-900'
+                    }`}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-medium text-neutral-400 mb-1">Emergency Contact</label>
+                <div className="relative">
+                  <Phone className="w-4 h-4 text-neutral-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="tel"
+                    value={emergencyContact}
+                    onChange={(e) => setEmergencyContact(e.target.value)}
                     className={`w-full pl-10 pr-4 py-2.5 rounded-xl border text-xs focus:outline-none focus:ring-2 focus:ring-blue-500/40 transition-all ${
                       isDark ? 'bg-[#181818] border-[#262626] text-white' : 'bg-neutral-50 border-neutral-200 text-neutral-900'
                     }`}
@@ -359,11 +270,13 @@ export const AuthModal: React.FC = () => {
                 type="submit"
                 className="w-full mt-2 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-[0_0_20px_rgba(37,99,235,0.3)] transition-all flex items-center justify-center space-x-2"
               >
-                <span>Initialize LifeVault Enclave</span>
+                <span>{isSubmitting ? 'Creating Account...' : 'Initialize LifeVault Enclave'}</span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </button>
             </form>
           )}
+
+          {error && <p className="mt-3 text-xs text-red-400" role="alert">{error}</p>}
 
           {/* Footer Security Badges */}
           <div className="mt-6 pt-4 border-t border-neutral-800/60 flex items-center justify-between text-[10px] text-neutral-500">
