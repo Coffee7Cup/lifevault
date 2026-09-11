@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useVault } from '../context/VaultContext';
 import {
   FileText,
@@ -15,14 +15,18 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { deleteDocumentApi, getDocumentFileUrl, listDocuments, normalizeDocument, uploadDocument } from '../lib/api';
 
 export const DocumentsView: React.FC = () => {
   const {
-    documents,
+    documents: vaultDocuments,
     addDocument,
-    deleteDocument,
+    replaceDocuments,
+    showToast,
     theme,
   } = useVault();
+
+  const documents = vaultDocuments ?? [];
 
   const isDark = theme === 'dark';
 
@@ -31,77 +35,168 @@ export const DocumentsView: React.FC = () => {
   const [isScanning, setIsScanning] = useState(false);
   const [scanStep, setScanStep] = useState('');
   const [activeCategory, setActiveCategory] = useState('all');
+  const [filePickerAccept, setFilePickerAccept] = useState<string | undefined>();
+  const [filePickerCapture, setFilePickerCapture] = useState<'environment' | undefined>();
+  const [uploadCategory, setUploadCategory] = useState('personal');
+  const [uploadKind, setUploadKind] = useState<'image' | 'pdf'>('image');
+  const [documentFileUrls, setDocumentFileUrls] = useState<Record<string, string>>({});
+  const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleSimulatedUpload = (fileType: string) => {
-    setIsScanning(true);
-    setScanStep('Preparing secure document import...');
+  useEffect(() => {
+    const token = localStorage.getItem('lifevault_token');
+    if (!token) return;
 
-    setTimeout(() => {
-      setScanStep('Reading document information...');
-    }, 900);
-
-    setTimeout(() => {
-      setScanStep('Verifying document integrity...');
-    }, 1800);
-
-    setTimeout(() => {
-      addDocument({
-        title:
-          fileType === 'will'
-            ? 'Registered Last Will & Testament'
-            : fileType === 'camera'
-            ? 'Camera Captured Health Card'
-            : 'Health Insurance Master Policy',
-
-        fileName:
-          fileType === 'will'
-            ? 'Will_Testament_2026_Certified.pdf'
-            : fileType === 'camera'
-            ? 'Camera_Scan_Health_2026.jpg'
-            : 'Health_Shield_Card_2026.pdf',
-
-        category: fileType === 'will' ? 'legal' : 'insurance',
-
-        fileSize: '3.4 MB',
-
-        mimeType:
-          fileType === 'camera'
-            ? 'image/jpeg'
-            : 'application/pdf',
-
-        isVerified: true,
-        ocrConfidence: 99.4,
-
-        encryptionType: 'AES-256-GCM + Hardware Enclave',
-
-        accessPermissions: [
-          'Spouse (Ananya)',
-          'Adv. Vikram Seth',
-        ],
-
-        extractedKeyData: [
-          {
-            key: 'Signatory',
-            value: 'Master Keyholder',
-          },
-          {
-            key: 'Executor',
-            value: 'Adv. Vikram Seth (Legal Counsel)',
-          },
-          {
-            key: 'Witnesses',
-            value: '2 Attested Witnesses',
-          },
-          {
-            key: 'Registration Ref',
-            value: 'REG/HYD/2026/8941',
-          },
-        ],
+    listDocuments(token)
+      .then((serverDocuments) => replaceDocuments((serverDocuments ?? []).map(normalizeDocument)))
+      .catch((error) => {
+        replaceDocuments([]);
+        showToast({
+          type: 'warning',
+          title: 'Documents Could Not Load',
+          message: error instanceof Error ? error.message : 'Unable to load your documents.',
+        });
       });
+  }, []);
 
-      setIsScanning(false);
+  useEffect(() => {
+    const token = localStorage.getItem('lifevault_token');
+    if (!token) {
+      setDocumentFileUrls({});
+      return;
+    }
+
+    let cancelled = false;
+    let createdUrls: string[] = [];
+    Promise.all(
+      (documents ?? []).map(async (document) => {
+        if (!document?.id) return null;
+        try {
+          const url = await getDocumentFileUrl(document.id, token);
+          return [document.id, url] as const;
+        } catch {
+          return null;
+        }
+      }),
+    ).then((entries) => {
+      const validEntries = entries.filter((entry): entry is readonly [string, string] => entry !== null);
+      createdUrls = validEntries.map(([, url]) => url);
+      if (cancelled) {
+        createdUrls.forEach((url) => URL.revokeObjectURL(url));
+        return;
+      }
+      setDocumentFileUrls(Object.fromEntries(validEntries));
+    });
+
+    return () => {
+      cancelled = true;
+      createdUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [documents]);
+
+  const openFilePicker = (category: string, kind: 'image' | 'pdf', accept: string, capture?: 'environment') => {
+    setUploadCategory(category);
+    setUploadKind(kind);
+    setFilePickerAccept(accept);
+    setFilePickerCapture(capture);
+    const input = fileInputRef.current;
+    if (input) {
+      input.accept = accept;
+      if (capture) {
+        input.setAttribute('capture', capture);
+      } else {
+        input.removeAttribute('capture');
+      }
+      input.click();
+    }
+  };
+
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    const isImage = file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|heic)$/i.test(file.name);
+    if ((uploadKind === 'pdf' && !isPdf) || (uploadKind === 'image' && !isImage)) {
+      showToast({ type: 'warning', title: 'Invalid File Type', message: uploadKind === 'pdf' ? 'Please select a PDF file.' : 'Please select an image file.' });
+      return;
+    }
+
+    const token = localStorage.getItem('lifevault_token');
+    if (!token) {
+      showToast({ type: 'warning', title: 'Authentication Required', message: 'Sign in again before uploading a document.' });
+      return;
+    }
+
+    setIsScanning(true);
+    setScanStep('Uploading securely...');
+
+    try {
+      const uploaded = await uploadDocument(file, file.name, uploadCategory, token);
+      console.log('Uploaded document:', uploaded);
+      if (!uploaded || typeof uploaded !== 'object') {
+        showToast({ type: 'warning', title: 'Document Upload Failed', message: 'The server returned no document.' });
+        return;
+      }
+      await addDocument(normalizeDocument(uploaded));
+      const refreshedDocuments = await listDocuments(token);
+      replaceDocuments(refreshedDocuments.map(normalizeDocument));
       setScanStep('');
-    }, 2700);
+    } catch (error) {
+      showToast({
+        type: 'warning',
+        title: 'Document Upload Failed',
+        message: error instanceof Error ? error.message : 'Unable to upload this document.',
+      });
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  const openDocumentFile = async (id: string) => {
+    const existingUrl = documentFileUrls[id];
+    if (existingUrl) {
+      window.open(existingUrl, '_blank', 'noopener,noreferrer');
+      return;
+    }
+
+    const token = localStorage.getItem('lifevault_token');
+    if (!token) {
+      showToast({ type: 'warning', title: 'Authentication Required', message: 'Sign in again before opening this document.' });
+      return;
+    }
+
+    try {
+      const url = await getDocumentFileUrl(id, token);
+      setDocumentFileUrls((current) => ({ ...current, [id]: url }));
+      window.open(url, '_blank', 'noopener,noreferrer');
+    } catch (error) {
+      showToast({ type: 'warning', title: 'Document Could Not Open', message: error instanceof Error ? error.message : 'Unable to open this document.' });
+    }
+  };
+
+  const handleDeleteDocument = async (id: string) => {
+    const token = localStorage.getItem('lifevault_token');
+    if (!token) {
+      showToast({ type: 'warning', title: 'Authentication Required', message: 'Sign in again before deleting a document.' });
+      return;
+    }
+
+    setDeletingDocumentId(id);
+    try {
+      await deleteDocumentApi(id, token);
+      replaceDocuments((documents ?? []).filter((document) => document.id !== id));
+      if (selectedDoc?.id === id) setSelectedDocIndex(null);
+    } catch (error) {
+      showToast({
+        type: 'warning',
+        title: 'Document Not Deleted',
+        message: error instanceof Error ? error.message : 'Unable to delete this document.',
+      });
+    } finally {
+      setDeletingDocumentId(null);
+    }
   };
 
   const categories = [
@@ -123,17 +218,20 @@ export const DocumentsView: React.FC = () => {
     },
   ];
 
-  const filteredDocs = documents.filter((doc) => {
+  const filteredDocs = (documents ?? []).filter((doc) => {
     const query = searchQuery.toLowerCase();
+    const title = String(doc?.title ?? '');
+    const fileName = String(doc?.fileName ?? '');
+    const category = String(doc?.category ?? '');
 
     const matchesSearch =
-      doc.title.toLowerCase().includes(query) ||
-      doc.fileName.toLowerCase().includes(query) ||
-      doc.category.toLowerCase().includes(query);
+      title.toLowerCase().includes(query) ||
+      fileName.toLowerCase().includes(query) ||
+      category.toLowerCase().includes(query);
 
     const matchesCategory =
       activeCategory === 'all' ||
-      doc.category === activeCategory;
+      String(doc?.category ?? '') === activeCategory;
 
     return matchesSearch && matchesCategory;
   });
@@ -283,6 +381,15 @@ export const DocumentsView: React.FC = () => {
             : 'bg-white border-black/10'
         }`}
       >
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept={filePickerAccept}
+          capture={filePickerCapture}
+          onChange={handleFileChange}
+          className="hidden"
+        />
+
         {isScanning ? (
           <div className="flex flex-col items-center justify-center py-8 text-center">
 
@@ -355,9 +462,7 @@ export const DocumentsView: React.FC = () => {
             <div className="flex flex-wrap justify-center gap-2.5 mt-6">
 
               <button
-                onClick={() =>
-                  handleSimulatedUpload('camera')
-                }
+                onClick={() => openFilePicker('personal', 'image', 'image/*', 'environment')}
                 className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs font-bold transition-all hover:-translate-y-0.5 ${
                   isDark
                     ? 'bg-white text-black hover:bg-neutral-200'
@@ -369,9 +474,7 @@ export const DocumentsView: React.FC = () => {
               </button>
 
               <button
-                onClick={() =>
-                  handleSimulatedUpload('insurance')
-                }
+                onClick={() => openFilePicker('personal', 'image', 'image/*')}
                 className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border text-xs font-bold transition-all hover:-translate-y-0.5 ${
                   isDark
                     ? 'border-white/10 text-neutral-300 hover:bg-white/[0.05]'
@@ -379,13 +482,11 @@ export const DocumentsView: React.FC = () => {
                 }`}
               >
                 <Image className="w-4 h-4" />
-                Gallery & Files
+                Gallery & Images
               </button>
 
               <button
-                onClick={() =>
-                  handleSimulatedUpload('will')
-                }
+                onClick={() => openFilePicker('legal', 'pdf', '.pdf,application/pdf')}
                 className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border text-xs font-bold transition-all hover:-translate-y-0.5 ${
                   isDark
                     ? 'border-white/10 text-neutral-300 hover:bg-white/[0.05]'
@@ -393,7 +494,7 @@ export const DocumentsView: React.FC = () => {
                 }`}
               >
                 <FileText className="w-4 h-4" />
-                Upload Will
+                Upload PDF
               </button>
 
             </div>
@@ -438,8 +539,18 @@ export const DocumentsView: React.FC = () => {
 
           {filteredDocs.map((doc, idx) => (
 
+            (() => {
+              const fileName = String(doc?.fileName ?? '');
+              const isPdf = doc?.mimeType === 'application/pdf' || fileName.toLowerCase().endsWith('.pdf');
+              const isImage = doc?.mimeType?.startsWith('image/') || /\.(jpg|jpeg|png|webp|heic)$/i.test(fileName);
+
+              return (
+
             <motion.article
               key={doc.id}
+              onClick={() => {
+                if (isPdf || isImage) void openDocumentFile(doc.id);
+              }}
               initial={{
                 opacity: 0,
                 y: 12,
@@ -473,7 +584,11 @@ export const DocumentsView: React.FC = () => {
                       : 'border-black/10 bg-black/[0.02] text-neutral-700'
                   }`}
                 >
-                  <FileText className="w-5 h-5" />
+                  {isImage && documentFileUrls[doc.id] ? (
+                    <img src={documentFileUrls[doc.id]} alt={doc.title} className="w-full h-full rounded-xl object-cover" />
+                  ) : (
+                    <FileText className={`${isPdf ? 'w-7 h-7' : 'w-5 h-5'}`} />
+                  )}
                 </div>
 
                 <div className="flex items-center gap-2">
@@ -494,8 +609,9 @@ export const DocumentsView: React.FC = () => {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      deleteDocument(doc.id);
+                      void handleDeleteDocument(doc.id);
                     }}
+                    disabled={deletingDocumentId === doc.id}
                     className={`p-2 rounded-lg transition-colors ${
                       isDark
                         ? 'text-neutral-600 hover:text-red-400 hover:bg-red-500/10'
@@ -522,18 +638,18 @@ export const DocumentsView: React.FC = () => {
                       : 'text-neutral-900'
                   }`}
                 >
-                  {doc.title}
+                  {String(doc?.title ?? '')}
                 </h3>
 
                 <p className="text-xs text-neutral-500 mt-1 truncate">
-                  {doc.fileName}
+                  {fileName}
                 </p>
 
                 <div className="flex items-center gap-2 mt-4 text-[11px] text-neutral-500">
                   <span>{doc.fileSize}</span>
                   <span>•</span>
                   <span>
-                    {doc.category}
+                    {String(doc?.category ?? '')}
                   </span>
                 </div>
 
@@ -555,13 +671,15 @@ export const DocumentsView: React.FC = () => {
                 </span>
 
                 <button
-                  onClick={() =>
-                    setSelectedDocIndex(idx)
-                  }
+                  onClick={() => {
+                    if (isPdf || isImage) {
+                      void openDocumentFile(doc.id);
+                    } else {
+                      setSelectedDocIndex(idx);
+                    }
+                  }}
                   className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold transition-all ${
-                    isDark
-                      ? 'bg-white text-black hover:bg-neutral-200'
-                      : 'bg-neutral-900 text-white hover:bg-neutral-800'
+                    'bg-neutral-900 text-white hover:bg-neutral-800'
                   }`}
                 >
                   <Eye className="w-3.5 h-3.5" />
@@ -571,6 +689,8 @@ export const DocumentsView: React.FC = () => {
               </div>
 
             </motion.article>
+              );
+            })()
 
           ))}
 
@@ -685,11 +805,11 @@ export const DocumentsView: React.FC = () => {
                   <div className="min-w-0">
 
                     <h3 className="text-base font-bold truncate">
-                      {selectedDoc.title}
+                      {String(selectedDoc.title ?? '')}
                     </h3>
 
                     <p className="text-xs text-neutral-500 truncate">
-                      {selectedDoc.fileName}
+                      {String(selectedDoc.fileName ?? '')}
                     </p>
 
                   </div>
@@ -772,13 +892,13 @@ export const DocumentsView: React.FC = () => {
                   }`}
                 >
 
-                  {selectedDoc.extractedKeyData.map(
+                      {(selectedDoc.extractedKeyData ?? []).map(
                     (item, idx) => (
                       <div
                         key={idx}
                         className={`flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 px-4 py-3 ${
                           idx !==
-                          selectedDoc.extractedKeyData.length - 1
+                          (selectedDoc.extractedKeyData ?? []).length - 1
                             ? isDark
                               ? 'border-b border-white/[0.07]'
                               : 'border-b border-black/[0.07]'
@@ -787,7 +907,7 @@ export const DocumentsView: React.FC = () => {
                       >
 
                         <span className="text-xs text-neutral-500">
-                          {item.key}
+                          {String(item?.key ?? '')}
                         </span>
 
                         <span
@@ -797,7 +917,7 @@ export const DocumentsView: React.FC = () => {
                               : 'text-neutral-800'
                           }`}
                         >
-                          {item.value}
+                          {String(item?.value ?? '')}
                         </span>
 
                       </div>

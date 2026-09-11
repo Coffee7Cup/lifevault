@@ -38,9 +38,10 @@ import {
   deleteDocument as deleteDocumentRequest,
   deleteTrustedPerson as deleteTrustedPersonRequest,
   getAssets,
-  getDocuments,
   getMe,
   getTrustedPeople,
+  listDocuments,
+  normalizeDocument,
   TOKEN_KEY,
   updateAsset as updateAssetRequest,
   updateTrustedPerson as updateTrustedPersonRequest,
@@ -72,7 +73,8 @@ interface VaultContextType {
   updateAsset: (id: string, updated: Partial<AssetItem>) => void;
   deleteAsset: (id: string) => void;
   documents: DocumentItem[];
-  addDocument: (doc: Omit<DocumentItem, 'id' | 'uploadDate' | 'sha256'>) => void;
+  addDocument: (doc: Omit<DocumentItem, 'id' | 'uploadDate' | 'sha256'> | DocumentItem) => Promise<void>;
+  replaceDocuments: (documents: DocumentItem[]) => void;
   deleteDocument: (id: string) => void;
   trustedPeople: TrustedPerson[];
   addTrustedPerson: (person: Omit<TrustedPerson, 'id' | 'lastActive'>) => void;
@@ -239,11 +241,13 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   useEffect(() => {
     if (!isAuthenticated) return;
-    Promise.all([getAssets(), getDocuments(), getTrustedPeople()])
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) return;
+    Promise.all([getAssets(), listDocuments(token), getTrustedPeople()])
       .then(([nextAssets, nextDocuments, nextPeople]) => {
-        setAssets(nextAssets);
-        setDocuments(nextDocuments);
-        setTrustedPeople(nextPeople);
+        setAssets(nextAssets ?? []);
+        setDocuments((nextDocuments ?? []).map(normalizeDocument));
+        setTrustedPeople(nextPeople ?? []);
       })
       .catch((error) => {
         console.error('Unable to load vault data:', error);
@@ -254,7 +258,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const loadDemoVault = () => {
     setUser(INITIAL_USER);
     setAssets(INITIAL_ASSETS);
-    setDocuments(INITIAL_DOCUMENTS);
+    setDocuments(INITIAL_DOCUMENTS.map(normalizeDocument));
     setTrustedPeople(INITIAL_TRUSTED_PEOPLE);
     setRecoverySteps(INITIAL_RECOVERY_STEPS);
     setAuditLogs(INITIAL_AUDIT_LOGS);
@@ -692,7 +696,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const updateAsset = async (id: string, updated: Partial<AssetItem>) => {
     try {
       const savedAsset = await updateAssetRequest(id, { ...updated, updatedAt: 'Just now' });
-      setAssets((prev) => prev.map((a) => (a.id === id ? savedAsset : a)));
+      setAssets((prev) => (prev ?? []).map((a) => (a.id === id ? savedAsset : a)));
     } catch {
       showToast({ type: 'warning', title: 'Asset Not Saved', message: 'Unable to sync this asset to your vault.' });
       return;
@@ -705,14 +709,14 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const deleteAsset = async (id: string) => {
-    const asset = assets.find((a) => a.id === id);
+    const asset = (assets ?? []).find((a) => a.id === id);
     try {
       await deleteAssetRequest(id);
     } catch {
       showToast({ type: 'warning', title: 'Asset Not Removed', message: 'Unable to update your vault.' });
       return;
     }
-    setAssets((prev) => prev.filter((a) => a.id !== id));
+    setAssets((prev) => (prev ?? []).filter((a) => a.id !== id));
     showToast({
       type: 'warning',
       title: 'Asset Removed',
@@ -720,16 +724,29 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   };
 
-  const addDocument = async (docData: Omit<DocumentItem, 'id' | 'uploadDate' | 'sha256'>) => {
-    const newDoc: DocumentItem = {
-      ...docData,
-      id: 'doc-' + Date.now(),
-      uploadDate: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
-      sha256: Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join(''),
-    };
+  const replaceDocuments = (nextDocuments: DocumentItem[]) => {
+    setDocuments((nextDocuments ?? []).map(normalizeDocument));
+  };
+
+  const addDocument = async (docData: Omit<DocumentItem, 'id' | 'uploadDate' | 'sha256'> | DocumentItem) => {
+    if (!docData || typeof docData !== 'object') {
+      showToast({ type: 'warning', title: 'Document Not Saved', message: 'The server returned no document.' });
+      return;
+    }
+    const isServerDocument = 'id' in docData && Boolean(docData.id);
+    const newDoc = normalizeDocument(
+      isServerDocument
+        ? docData
+        : {
+            ...docData,
+            id: 'doc-' + Date.now(),
+            uploadDate: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
+            sha256: Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join(''),
+          },
+    );
     try {
-      const savedDocument = await createDocument(newDoc);
-      setDocuments((prev) => [savedDocument, ...prev]);
+      const savedDocument = isServerDocument ? newDoc : await createDocument(newDoc);
+      setDocuments((prev) => [savedDocument, ...(prev ?? []).filter((document) => document.id !== savedDocument.id)]);
     } catch {
       showToast({ type: 'warning', title: 'Document Not Saved', message: 'Unable to sync this document to your vault.' });
       return;
@@ -750,14 +767,14 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const deleteDocument = async (id: string) => {
-    const doc = documents.find((d) => d.id === id);
+    const doc = (documents ?? []).find((d) => d.id === id);
     try {
       await deleteDocumentRequest(id);
     } catch {
       showToast({ type: 'warning', title: 'Document Not Removed', message: 'Unable to update your vault.' });
       return;
     }
-    setDocuments((prev) => prev.filter((d) => d.id !== id));
+    setDocuments((prev) => (prev ?? []).filter((d) => d.id !== id));
     showToast({
       type: 'warning',
       title: 'Document Shredded',
@@ -796,7 +813,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const updateTrustedPerson = async (id: string, updated: Partial<TrustedPerson>) => {
     try {
       const savedPerson = await updateTrustedPersonRequest(id, updated);
-      setTrustedPeople((prev) => prev.map((p) => (p.id === id ? savedPerson : p)));
+      setTrustedPeople((prev) => (prev ?? []).map((p) => (p.id === id ? savedPerson : p)));
     } catch {
       showToast({ type: 'warning', title: 'Trustee Not Saved', message: 'Unable to sync this trustee to your vault.' });
       return;
@@ -809,14 +826,14 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const deleteTrustedPerson = async (id: string) => {
-    const person = trustedPeople.find((p) => p.id === id);
+    const person = (trustedPeople ?? []).find((p) => p.id === id);
     try {
       await deleteTrustedPersonRequest(id);
     } catch {
       showToast({ type: 'warning', title: 'Trustee Not Removed', message: 'Unable to update your vault.' });
       return;
     }
-    setTrustedPeople((prev) => prev.filter((p) => p.id !== id));
+    setTrustedPeople((prev) => (prev ?? []).filter((p) => p.id !== id));
     showToast({
       type: 'warning',
       title: 'Trustee Revoked',
@@ -899,10 +916,10 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         body: JSON.stringify({
           message: text,
           context: {
-            assetsCount: assets.length,
-            docsCount: documents.length,
-            trustedCount: trustedPeople.length,
-            totalValuation: assets.reduce((sum, a) => sum + (a.valuation || 0), 0),
+            assetsCount: (assets ?? []).length,
+            docsCount: (documents ?? []).length,
+            trustedCount: (trustedPeople ?? []).length,
+            totalValuation: (assets ?? []).reduce((sum, a) => sum + (a.valuation || 0), 0),
           },
         }),
       });
@@ -925,7 +942,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const fallbackReply: ChatMessage = {
         id: 'msg-' + (Date.now() + 1),
         sender: 'assistant',
-        text: `### 🛡️ LIFEVAULT Continuity Sentinel\nI have securely processed your query regarding **"${text}"**.\n\n* **Assets Protected**: ₹${(totalNetWorth / 10000000).toFixed(2)} Cr across ${assets.length} portfolio items.\n* **Documents**: ${documents.length} verified zero-knowledge records.\n* **Next Recommended Step**: Ensure your Will document is marked with primary trustee access for seamless transfer.`,
+        text: `### 🛡️ LIFEVAULT Continuity Sentinel\nI have securely processed your query regarding **"${text}"**.\n\n* **Assets Protected**: ₹${(totalNetWorth / 10000000).toFixed(2)} Cr across ${(assets ?? []).length} portfolio items.\n* **Documents**: ${(documents ?? []).length} verified zero-knowledge records.\n* **Next Recommended Step**: Ensure your Will document is marked with primary trustee access for seamless transfer.`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
       setChatMessages((prev) => [...prev, fallbackReply]);
@@ -935,12 +952,12 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   // Computed values
-  const totalNetWorth = assets.reduce((sum, a) => sum + (a.valuation || 0), 0);
+  const totalNetWorth = (assets ?? []).reduce((sum, a) => sum + (a.valuation || 0), 0);
   const completedRecovery = recoverySteps.filter((s) => s.completed).length;
   const recoveryReadiness = recoverySteps.length > 0 ? Math.round((completedRecovery / recoverySteps.length) * 100) : 0;
-  const verifiedDocs = documents.filter((d) => d.isVerified).length;
-  const securityScore = Math.min(100, Math.round((verifiedDocs / (documents.length || 1)) * 40 + (user.biometricEnabled ? 30 : 0) + (user.mfaEnabled ? 20 : 0) + (trustedPeople.length >= 3 ? 10 : 5)));
-  const activeAlertCount = (emergencyActive ? 1 : 0) + assets.filter((a) => a.status === 'review_needed').length;
+  const verifiedDocs = (documents ?? []).filter((d) => d.isVerified).length;
+  const securityScore = Math.min(100, Math.round((verifiedDocs / ((documents ?? []).length || 1)) * 40 + (user.biometricEnabled ? 30 : 0) + (user.mfaEnabled ? 20 : 0) + ((trustedPeople ?? []).length >= 3 ? 10 : 5)));
+  const activeAlertCount = (emergencyActive ? 1 : 0) + (assets ?? []).filter((a) => a.status === 'review_needed').length;
 
   return (
     <VaultContext.Provider
@@ -962,6 +979,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         deleteAsset,
         documents,
         addDocument,
+        replaceDocuments,
         deleteDocument,
         trustedPeople,
         addTrustedPerson,

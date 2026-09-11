@@ -59,6 +59,9 @@ export interface DocumentItem {
   fileName: string;
   fileSize: string;
   uploadDate: string;
+  uploadedAt?: string;
+  fileUrl?: string;
+  fileType?: string;
   mimeType?: string;
   isVerified?: boolean;
   sha256?: string;

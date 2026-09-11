@@ -23,6 +23,29 @@ const getErrorMessage = (error: unknown, fallback: string) => {
   return fallback;
 };
 
+export const normalizeDocument = (raw: unknown): DocumentItem => {
+  const value = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+  const id = String(value.id ?? '');
+  const fileName = String(value.fileName ?? value.filename ?? value.original_name ?? '');
+  const uploadedAt = String(value.uploadedAt ?? value.uploaded_at ?? value.created_at ?? value.uploadDate ?? '');
+  const fileType = String(value.fileType ?? value.mimeType ?? value.mime_type ?? (fileName.toLowerCase().endsWith('.pdf') ? 'application/pdf' : ''));
+
+  return {
+    ...value,
+    id,
+    title: String(value.title ?? ''),
+    category: String(value.category ?? '') as DocumentItem['category'],
+    fileName,
+    fileSize: String(value.fileSize ?? value.file_size ?? ''),
+    uploadDate: String(value.uploadDate ?? uploadedAt),
+    uploadedAt,
+    fileUrl: String(value.fileUrl ?? value.file_url ?? (id ? `/api/vault/documents/${id}/file` : '')),
+    fileType,
+    mimeType: String(value.mimeType ?? fileType),
+    extractedKeyData: Array.isArray(value.extractedKeyData) ? value.extractedKeyData as DocumentItem['extractedKeyData'] : [],
+  };
+};
+
 export interface AuthResponse {
   token: string;
   user: UserProfile;
@@ -79,6 +102,79 @@ export const deleteAsset = (id: string) => api.delete(`/vault/assets/${id}`);
 
 export const createDocument = (document: DocumentItem) => api.post<DocumentItem>('/vault/documents', document).then((response) => response.data);
 export const deleteDocument = (id: string) => api.delete(`/vault/documents/${id}`);
+
+export const uploadDocument = async (
+  file: File,
+  title: string,
+  category: string,
+  token: string,
+): Promise<DocumentItem> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('title', title);
+  formData.append('category', category);
+  try {
+    const response = await api.post<{ document?: DocumentItem } | DocumentItem>('/vault/documents', formData, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const responseData = response.data;
+    const uploaded =
+      responseData && typeof responseData === 'object' && 'document' in responseData
+        ? responseData.document
+        : responseData;
+    if (!uploaded || typeof uploaded !== 'object') {
+      throw new Error('Upload succeeded but the server returned no document.');
+    }
+    const normalized = normalizeDocument(uploaded);
+    if (!normalized.id) throw new Error('Upload succeeded but the server returned no document ID.');
+    return normalized;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      if (error.response?.status === 413) throw new Error('File is too large. The maximum size is 25MB.');
+      if (error.response?.status === 401) throw new Error('Your session has expired. Please sign in again.');
+      if (error.response?.status === 400) throw new Error(error.response.data?.error || 'Invalid file type.');
+      if (!error.response) throw new Error('Network error. Check your connection and try again.');
+    }
+    throw new Error('Unable to upload this document.');
+  }
+};
+
+export const getDocumentFileUrl = async (id: string, token: string): Promise<string> => {
+  try {
+    const response = await api.get(`/vault/documents/${id}/file`, {
+      headers: { Authorization: `Bearer ${token}` },
+      responseType: 'blob',
+    });
+    return URL.createObjectURL(response.data);
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      if (error.response?.status === 401) throw new Error('Your session has expired. Please sign in again.');
+      if (!error.response) throw new Error('Network error. Check your connection and try again.');
+    }
+    throw new Error('Unable to open this document.');
+  }
+};
+
+export const listDocuments = async (token: string): Promise<DocumentItem[]> => {
+  try {
+    const response = await api.get<{ documents?: unknown[] } | unknown[]>('/vault/documents', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const rawDocuments = Array.isArray(response.data) ? response.data : response.data.documents;
+    return (rawDocuments ?? []).map(normalizeDocument);
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      if (error.response?.status === 401) throw new Error('Your session has expired. Please sign in again.');
+      if (!error.response) throw new Error('Network error. Check your connection and try again.');
+    }
+    throw new Error('Unable to load your documents.');
+  }
+};
+
+export const deleteDocumentApi = (id: string, token: string) =>
+  api.delete(`/vault/documents/${id}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
 
 export const createTrustedPerson = (person: TrustedPerson) => api.post<TrustedPerson>('/vault/trusted-people', person).then((response) => response.data);
 export const updateTrustedPerson = (id: string, person: Partial<TrustedPerson>) => api.patch<TrustedPerson>(`/vault/trusted-people/${id}`, person).then((response) => response.data);
